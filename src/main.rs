@@ -1,32 +1,31 @@
 use std::fs::{File, OpenOptions, copy, create_dir_all, read_to_string};
 use std::io::{Write, stdin, stdout};
-use std::path::PathBuf;
 
-use chrono::{Local, MappedLocalTime, NaiveDateTime, TimeZone, Utc};
+use chrono::{DateTime, Local, MappedLocalTime, NaiveDateTime, TimeZone, Utc};
 use clap::{Parser, Subcommand};
 use color_eyre::eyre::{Report, Result};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 use serde_json;
 
-const TIME_FMT: &str = "%d/%m/%y %H:%M";
+const TIME_FMT: &str = "%d/%m/%y %H:%M:%S";
 
 #[derive(Debug, Subcommand)]
 enum Commands {
     /// Add an entry to the diary
     AddEntry {
-        /// Manually set a different timestamp than the current. Time of the entry must be in "DD/MM/YY HH:MM" format
+        /// Manually set a different timestamp than the current. Time of the entry must be in "DD/MM/YY HH:MM:SS" format
         #[arg(short, long)]
         timestamp: Option<String>,
     },
     /// Modify an entry in the diary
     ChangeEntry {
-        /// Time of the entry in format "DD/MM/YY HH:MM
+        /// Time of the entry in format "DD/MM/YY HH:MM:SS"
         timestamp: String,
     },
     /// Remove an entry from the diary
     RemoveEntry {
-        /// Time of the entry in format "DD/MM/YY HH:MM"
+        /// Time of the entry in format "DD/MM/YY HH:MM:SS"
         timestamp: String,
     },
     /// Print the diary on the screen
@@ -84,7 +83,7 @@ fn main() -> Result<()> {
     } else if !data_dir_path.is_dir() {
         let name = data_dir_path.to_string_lossy();
         return Err(Report::msg(format!(
-            "Objectc with name '{}' already exists.",
+            "Object with name '{}' already exists.",
             name
         )));
     }
@@ -107,63 +106,174 @@ fn main() -> Result<()> {
     };
 
     match cli.command {
+        // Handle adding a new entry to the diary
         Commands::AddEntry {
             timestamp: timestring,
         } => {
             let timestamp = if let Some(timestring) = timestring {
-                let naive_datetime = NaiveDateTime::parse_from_str(&timestring, TIME_FMT)?;
-                let local_datetime = TimeZone::from_local_datetime(&Local, &naive_datetime);
-                match local_datetime {
-                    MappedLocalTime::Single(datetime) => datetime.timestamp(),
-                    MappedLocalTime::Ambiguous(_, _) => {
-                        let report = Report::msg(
-                            "The local time is ambiguous because there is a fold in the local time.",
-                        );
-                        return Err(report);
-                    }
-                    MappedLocalTime::None => {
-                        let report = Report::msg("The local time does not exist because there is a gap in the local time.
-This error may also be returned if there was an error while resolving the local time,
-caused by for example missing time zone data files, an error in an OS API, or overflow."
-                    );
-                        return Err(report);
-                    }
-                }
+                timestring_to_timestamp(&timestring)?
             } else {
                 Utc::now().timestamp()
             };
 
-            if diary
+            if let Some(old_entry) = diary
                 .diary_entries
                 .iter()
-                .map(|entry| entry.timestamp)
-                .any(|old_timestamp| old_timestamp == timestamp)
+                .find(|old_diary_entry| old_diary_entry.timestamp == timestamp)
             {
-                let report = Report::msg("An entry with this timestamp is already present.");
+                let report = Report::msg(format!(
+                    "An entry with this timestamp is already present:\n{:#?}",
+                    old_entry
+                ));
                 return Err(report);
             }
 
             let new_entry = DiaryEntry::from_user_input(timestamp)?;
             diary.diary_entries.push(new_entry);
         }
-        _ => (),
+        // Handle changing an entry in the diary
+        Commands::ChangeEntry {
+            timestamp: timestring,
+        } => {
+            let timestamp = timestring_to_timestamp(&timestring)?;
+
+            if let Some(old_entry) = diary
+                .diary_entries
+                .iter_mut()
+                .find(|old_diary_entry| old_diary_entry.timestamp == timestamp)
+            {
+                println!("Old diary entry:\n{:#?}\nNew entry:\n", old_entry);
+
+                *old_entry = DiaryEntry::from_user_input(timestamp)?;
+            } else {
+                let report = Report::msg("No entry with the given timestamp found.");
+                return Err(report);
+            }
+        }
+        // Handle removing an entry from the diary
+        Commands::RemoveEntry {
+            timestamp: timestring,
+        } => {
+            let timestamp = timestring_to_timestamp(&timestring)?;
+
+            let entry_position = diary
+                .diary_entries
+                .iter()
+                .position(|old_diary_entry| old_diary_entry.timestamp == timestamp);
+
+            if let Some(old_entry_position) = entry_position {
+                loop {
+                    println!(
+                        "Are you sure you want to delete this entry? [yes/no]\n{:#?}",
+                        diary.diary_entries[old_entry_position]
+                    );
+                    let mut decision = String::new();
+                    stdin().read_line(&mut decision)?;
+                    match decision.trim() {
+                        "yes" => {
+                            diary.diary_entries.swap_remove(old_entry_position);
+                            break;
+                        }
+                        "no" => {
+                            // The diary has not been modified so don't bother updating the file
+                            return Ok(());
+                        }
+                        _ => continue,
+                    }
+                }
+            } else {
+                let report = Report::msg("No entry with the given timestamp found.");
+                return Err(report);
+            }
+        }
+        // Print all the entries in a CSV format
+        Commands::PrintDiary => {
+            for entry in &diary.diary_entries {
+                let DiaryEntry {
+                    timestamp,
+                    mood,
+                    anxiety,
+                    sadness,
+                    anger,
+                    tiredness,
+                    restlessness,
+                    note,
+                } = entry;
+
+                let note = if let Some(entry_note) = note {
+                    entry_note.as_str()
+                } else {
+                    ""
+                };
+
+                let utc_datetime = DateTime::from_timestamp_secs(*timestamp);
+                let local_datetime = if let Some(datetime) = utc_datetime {
+                    let naive_datetime = datetime.naive_utc();
+                    Local
+                        .from_utc_datetime(&naive_datetime)
+                        .format(TIME_FMT)
+                        .to_string()
+                } else {
+                    String::from("out-of-range number of seconds")
+                };
+
+                println!(
+                    "{},{},{},{},{},{},{},{}",
+                    local_datetime, mood, anxiety, sadness, anger, tiredness, restlessness, note
+                );
+            }
+
+            // The diary has not been modified so don't bother updating the file
+            return Ok(());
+        }
     }
 
+    // Sort the diary chronologically
+    diary.diary_entries.sort_by_key(|entry| entry.timestamp);
+
+    // Serialize the new contents in the diary
     let mut new_diary_content = serde_json::to_vec(&diary)?;
     new_diary_content.push(b'\n');
 
+    // Define the path to the backup copy of the diary e copy the current diary
     let mut backup_diary_path = diary_path.clone();
-    backup_diary_path.push(PathBuf::from("~"));
+    backup_diary_path.set_extension("json~");
     copy(&diary_path, &backup_diary_path)?;
 
+    // Open the diary and owerwrite its contents
     let mut diary_file = OpenOptions::new()
         .truncate(true)
         .write(true)
         .open(&diary_path)?;
-
     diary_file.write_all(&new_diary_content)?;
 
     Ok(())
+}
+
+// Get the timestamp from a date and time string
+fn timestring_to_timestamp(timestring: &str) -> Result<i64> {
+    let naive_datetime = NaiveDateTime::parse_from_str(&timestring, TIME_FMT)?;
+    let local_datetime = TimeZone::from_local_datetime(&Local, &naive_datetime);
+
+    match local_datetime {
+        MappedLocalTime::Single(datetime) => Ok(datetime.timestamp()),
+        MappedLocalTime::Ambiguous(_, _) => {
+            let report = Report::msg(
+                "The local time is ambiguous because there is a fold in the local time.",
+            );
+
+            Err(report)
+        }
+        MappedLocalTime::None => {
+            let report = Report::msg(
+                "The local time does not exist because there is a gap in the local time.
+This error may also be returned if there was an error while resolving the local time,
+caused by for example missing time zone data files, an error in an OS API, or overflow.",
+            );
+
+            Err(report)
+        }
+    }
 }
 
 impl DiaryEntry {
@@ -216,7 +326,7 @@ impl DiaryEntry {
         entry.note = if input.trim().is_empty() {
             None
         } else {
-            Some(input)
+            Some(input.trim().to_string())
         };
 
         Ok(entry)
