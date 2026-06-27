@@ -93,7 +93,10 @@ impl DiaryEntry {
         entry.timestamp = timestamp;
         entry.date = date;
 
-        for field in active_fields {
+        let mut active_fields_sorted: Vec<_> = active_fields.iter().collect();
+        active_fields_sorted.sort();
+
+        for field in active_fields_sorted {
             let mut user_input = String::new();
             print!("{}: ", field);
             stdout().flush()?;
@@ -211,12 +214,9 @@ fn main() -> Result<()> {
             }
 
             if display_fields {
-                let active_fields_str = diary
-                    .active_fields
-                    .iter()
-                    .cloned()
-                    .collect::<Vec<_>>()
-                    .join(", ");
+                let mut active_fields = diary.active_fields.iter().cloned().collect::<Vec<_>>();
+                active_fields.sort();
+                let active_fields_str = active_fields.join(", ");
                 println!("{active_fields_str}");
 
                 // The diary has not been modified so don't bother updating the file, unless is new
