@@ -314,7 +314,7 @@ fn main() -> Result<()> {
                     println!("{field}: {val}");
                 }
                 if let Some(note) = &entry.note {
-                    println!("{note}");
+                    println!("Notes: {note}");
                 }
                 println!();
             }
